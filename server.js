@@ -16,7 +16,7 @@ connectDB();
 // Middleware
 app.use(express.json());
 app.use(cors({
-  origin: ["http://localhost:5173", "http://localhost:5174", "https://expense-client-qroy.vercel.app"],
+  origin: ["http://localhost:5173", "http://localhost:5174", "https://expense-client-qroy.vercel.app", "https://keep-server-alive-render-u2jq.vercel.app"],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   credentials: true
 }));
