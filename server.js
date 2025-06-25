@@ -16,7 +16,7 @@ connectDB();
 // Middleware
 app.use(express.json());
 app.use(cors({
-  origin: ["http://localhost:5173", "http://localhost:5174", "https://expense-client-one.vercel.app", "https://expense-client-qroy.vercel.app"],
+  origin: ["http://localhost:5173", "http://localhost:5174", "https://expense-client-qroy.vercel.app"],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   credentials: true
 }));
@@ -28,6 +28,9 @@ app.use("/api/users", userRoutes);
 app.use("/api/budget", budgetRoutes);
 app.use("/api/transactions", transactionRoutes);
 app.use("/api/recurring", recurringRoutes);
+app.get("/status", (req, res) => {
+  res.status(200).send("✅ Server is alive!");
+});
 
 // Trigger auto-debit once at startup (optional)
 generateRecurringTransactions();
