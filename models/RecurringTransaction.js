@@ -6,9 +6,13 @@ const recurringTransactionSchema = new mongoose.Schema({
   amount: { type: Number, required: true },
   type: { type: String, enum: ["debit", "credit"], default: "debit" },
   frequency: { type: String, enum: ["weekly", "monthly"], required: true },
-  day: Number, // 1–7 (Mon–Sun), or 1–31 for monthly
-  startDate: { type: Date, required: true },
-  endDate: Date,
+
+  startsOn: { type: Date, required: true }, // Now used for weekly and monthly
+  weeklyDay: {
+    type: String,
+    enum: ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+  },
+
   lastGenerated: Date
 });
 

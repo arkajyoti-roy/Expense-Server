@@ -3,20 +3,50 @@ const RecurringTransaction = require("../models/RecurringTransaction");
 const Budget = require("../models/budget");
 const mongoose = require("mongoose");
 
-// Add a new transaction
+// ➕ Add Transaction with Budget Enforcement
 const addTransaction = async (req, res) => {
   try {
     const { type, amount, description } = req.body;
+    const userId = req.user.userId;
+
     if (!["credit", "debit"].includes(type)) {
-      return res.status(400).json({ message: "Type must be credit or debit" });
+      return res.status(400).json({ message: "Type must be credit or debit." });
+    }
+
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ message: "Amount must be a positive number." });
+    }
+
+    const now = new Date();
+    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+
+    const budget = await Budget.findOne({ userId, month: monthKey });
+    if (!budget) {
+      return res.status(403).json({ message: "Monthly budget not set." });
+    }
+
+    if (type === "debit" && amount > budget.currentBalance) {
+      return res.status(400).json({ message: "Insufficient balance." });
     }
 
     const transaction = await Transaction.create({
-      userId: req.user.userId,
+      userId,
       type,
       amount,
-      description
+      description,
+      date: now,
+      month: monthKey
     });
+
+    const newBalance =
+      type === "debit"
+        ? budget.currentBalance - amount
+        : budget.currentBalance + amount;
+
+    await Budget.updateOne(
+      { userId, month: monthKey },
+      { currentBalance: newBalance }
+    );
 
     res.status(201).json(transaction);
   } catch (err) {
@@ -24,52 +54,71 @@ const addTransaction = async (req, res) => {
   }
 };
 
-// Get transactions for current month + live budget summary
+// 📤 Get Monthly Transactions + Summary
 const getTransactions = async (req, res) => {
   try {
     const userId = req.user.userId;
-    const now = new Date();
-    const start = new Date(now.getFullYear(), now.getMonth(), 1);
-    const end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const today = new Date();
+    const dayOfMonth = today.getDate();
+    const dayOfWeek = today.toLocaleDateString("en-US", { weekday: "long" });
+    const monthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
+    const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
 
-    // Regular transactions for the month
-    const transactions = await Transaction.find({
-      userId,
-      date: { $gte: start, $lt: end }
-    }).sort({ date: 1 });
+    // Fetch data
+    const [transactions, budget, recurringRules] = await Promise.all([
+      Transaction.find({ userId, date: { $gte: startOfMonth, $lte: endOfMonth } }),
+      Budget.findOne({ userId, month: monthKey }),
+      RecurringTransaction.find({ userId })
+    ]);
 
-    // Find budget for the month
-    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-    const budget = await Budget.findOne({ userId, month: monthKey });
     const openingBalance = budget?.openingBalance || 0;
 
-    // Totals from transactions
-    const totalCredit = transactions
-      .filter(txn => txn.type === "credit")
-      .reduce((sum, txn) => sum + txn.amount, 0);
+    // Basic transaction totals
+    const totalCredit = transactions.filter(txn => txn.type === "credit").reduce((sum, txn) => sum + txn.amount, 0);
+    const totalDebit = transactions.filter(txn => txn.type === "debit").reduce((sum, txn) => sum + txn.amount, 0);
 
-    const totalDebit = transactions
-      .filter(txn => txn.type === "debit")
-      .reduce((sum, txn) => sum + txn.amount, 0);
+    let totalRecurringCredit = 0;
+    let totalRecurringDebit = 0;
 
-    // Recurring transactions for the user (optional: filter by month)
-    const recurring = await RecurringTransaction.find({
-      userId,
-      startDate: { $lte: now },
-      $or: [{ endDate: null }, { endDate: { $gte: start } }]
-    });
+    // Virtual transactions from recurring rules
+    const virtualTransactions = recurringRules
+      .filter(rule => {
+        if (rule.frequency === "monthly" && rule.startsOn instanceof Date) {
+          return rule.startsOn.getDate() <= dayOfMonth;
+        }
+        if (rule.frequency === "weekly" && rule.weeklyDay === dayOfWeek) {
+          return true;
+        }
+        return false;
+      })
+      .map(rule => {
+        if (rule.type === "debit") totalRecurringDebit += rule.amount;
+        else totalRecurringCredit += rule.amount;
 
-    const totalRecurring = recurring.reduce((sum, r) => sum + r.amount, 0);
+        return {
+          _id: `virtual-${rule._id}`,
+          userId,
+          type: rule.type,
+          amount: rule.amount,
+          description: `Recurring: ${rule.title}`,
+          date: today,
+          isAutoGenerated: true
+        };
+      });
 
-    // Final net balance including recurring deduction
-    const netBalance = openingBalance + totalCredit - totalDebit - totalRecurring;
+    const allTransactions = [...transactions, ...virtualTransactions].sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    const netBalance =
+      openingBalance + totalCredit + totalRecurringCredit - totalDebit - totalRecurringDebit;
 
     res.status(200).json({
-      transactions,
+      transactions: allTransactions,
+      recurringRules,
       openingBalance,
       totalCredit,
-      totalDebit,
-      totalRecurring,
+      totalDebit: totalDebit + totalRecurringDebit,
+      totalRecurring: totalRecurringCredit + totalRecurringDebit,
       netBalance
     });
   } catch (err) {
@@ -77,45 +126,85 @@ const getTransactions = async (req, res) => {
   }
 };
 
-
-// Update a transaction
+// ✏️ Update Transaction (with balance adjustment)
 const updateTransaction = async (req, res) => {
   try {
-    const transaction = await Transaction.findOneAndUpdate(
-      { _id: req.params.id, userId: req.user.userId },
-      req.body,
+    const userId = req.user.userId;
+    const { id } = req.params;
+    const newData = req.body;
+
+    const original = await Transaction.findOne({ _id: id, userId });
+    if (!original) {
+      return res.status(404).json({ message: "Transaction not found." });
+    }
+
+    const monthKey = original.month;
+    const budget = await Budget.findOne({ userId, month: monthKey });
+    if (!budget) {
+      return res.status(403).json({ message: "Budget not found for this month." });
+    }
+
+    // Reverse old transaction
+    let tempBalance =
+      original.type === "debit"
+        ? budget.currentBalance + original.amount
+        : budget.currentBalance - original.amount;
+
+    // Apply new transaction
+    if (newData.type === "debit" && newData.amount > tempBalance) {
+      return res.status(400).json({ message: "Insufficient balance after update." });
+    }
+
+    tempBalance =
+      newData.type === "debit"
+        ? tempBalance - newData.amount
+        : tempBalance + newData.amount;
+
+    const updatedTxn = await Transaction.findOneAndUpdate(
+      { _id: id, userId },
+      newData,
       { new: true }
     );
 
-    if (!transaction) {
-      return res.status(404).json({ message: "Transaction not found" });
-    }
+    await Budget.updateOne({ userId, month: monthKey }, { currentBalance: tempBalance });
 
-    res.status(200).json(transaction);
+    res.status(200).json(updatedTxn);
   } catch (err) {
     res.status(500).json({ message: "Update failed", error: err.message });
   }
 };
 
-// Delete a transaction
+// 🗑 Delete Transaction (with budget restore)
 const deleteTransaction = async (req, res) => {
   try {
-    const deleted = await Transaction.findOneAndDelete({
-      _id: req.params.id,
-      userId: req.user.userId
-    });
+    const userId = req.user.userId;
+    const { id } = req.params;
 
-    if (!deleted) {
-      return res.status(404).json({ message: "Transaction not found" });
+    const transaction = await Transaction.findOneAndDelete({ _id: id, userId });
+    if (!transaction) {
+      return res.status(404).json({ message: "Transaction not found." });
     }
 
-    res.status(200).json({ message: "Transaction deleted" });
+    const budget = await Budget.findOne({ userId, month: transaction.month });
+    if (budget) {
+      const restoredBalance =
+        transaction.type === "debit"
+          ? budget.currentBalance + transaction.amount
+          : budget.currentBalance - transaction.amount;
+
+      await Budget.updateOne(
+        { userId, month: transaction.month },
+        { currentBalance: restoredBalance }
+      );
+    }
+
+    res.status(200).json({ message: "Transaction deleted." });
   } catch (err) {
     res.status(500).json({ message: "Delete failed", error: err.message });
   }
 };
 
-// Get last 6 months' transactions + recurring
+// 📅 Get Last 6 Months Transactions + Recurring
 const getLastSixMonthsTransactions = async (req, res) => {
   try {
     const userId = req.user.userId;
@@ -123,10 +212,7 @@ const getLastSixMonthsTransactions = async (req, res) => {
     const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1);
 
     const [transactions, recurring] = await Promise.all([
-      Transaction.find({
-        userId,
-        date: { $gte: sixMonthsAgo, $lte: now }
-      }).sort({ date: 1 }),
+      Transaction.find({ userId, date: { $gte: sixMonthsAgo, $lte: now } }).sort({ date: 1 }),
       RecurringTransaction.find({ userId })
     ]);
 
@@ -136,14 +222,14 @@ const getLastSixMonthsTransactions = async (req, res) => {
   }
 };
 
-// Get transactions within a custom date range + summary + recurring
+// 🔍 Custom Range Summary
 const getCustomTransactionsWithSummary = async (req, res) => {
   try {
     const userId = req.user.userId;
     const { start, end } = req.query;
 
     if (!start || !end) {
-      return res.status(400).json({ message: "Start and end dates are required" });
+      return res.status(400).json({ message: "Start and end dates are required." });
     }
 
     const startDate = new Date(start);
@@ -192,12 +278,12 @@ const getCustomTransactionsWithSummary = async (req, res) => {
     res.status(500).json({ message: "Failed to fetch custom transactions", error: err.message });
   }
 };
-
-module.exports = {
+// Export all functions
+module.exports = {  
   addTransaction,
   getTransactions,
   updateTransaction,
   deleteTransaction,
   getLastSixMonthsTransactions,
   getCustomTransactionsWithSummary
-};
+};  
