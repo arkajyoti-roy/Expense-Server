@@ -7,7 +7,9 @@ const budgetRoutes = require("./routes/budgetRoutes");
 const transactionRoutes = require("./routes/transactionRoutes");
 const recurringRoutes = require("./routes/recurringRoutes");
 const generateRecurringTransactions = require("./utils/generateRecurring"); // ✅ only once
+const archiveRoutes = require("./routes/monthArchiveRoutes");
 const cron = require("node-cron");
+require("./cron/archiveMonthly");
 
 dotenv.config();
 const app = express();
@@ -28,9 +30,29 @@ app.use("/api/users", userRoutes);
 app.use("/api/budget", budgetRoutes);
 app.use("/api/transactions", transactionRoutes);
 app.use("/api/recurring", recurringRoutes);
+app.use("/api/month-archive", archiveRoutes);
+
 app.get("/status", (req, res) => {
   res.status(200).send("✅ Server is alive!");
 });
+
+
+
+
+
+app.post("/manual-archive", async (req, res) => {
+  const { userId, monthKey, openingBalance } = req.body;
+
+  try {
+    await archiveMonthEndSnapshot(userId, monthKey, openingBalance);
+    res.status(200).send("Snapshot archived manually.");
+  } catch (err) {
+    res.status(500).send("Error archiving: " + err.message);
+  }
+});
+const archiveMonthEndSnapshot = require("./utils/archiveMonthEndSnapshot");
+
+  // kkk?
 
 // Trigger auto-debit once at startup (optional)
 generateRecurringTransactions();

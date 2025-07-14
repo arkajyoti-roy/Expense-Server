@@ -18,10 +18,31 @@ const monthEndBalanceSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
+  transactions: [
+    {
+      date: {
+        type: String, // Format: "YYYY-MM-DD"
+        required: true
+      },
+      type: {
+        type: String, // "credit" or "debit"
+        enum: ["credit", "debit"],
+        required: true
+      },
+      amount: {
+        type: Number,
+        required: true
+      },
+      description: {
+        type: String,
+        default: ""
+      }
+    }
+  ],
   archivedAt: {
     type: Date,
     default: Date.now
   }
 });
 
-module.exports = mongoose.model("MonthEndBalance", monthEndBalanceSchema);
+module.exports = mongoose.models.MonthEndBalance || mongoose.model("MonthEndBalance", monthEndBalanceSchema);
