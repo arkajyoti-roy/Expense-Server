@@ -58,31 +58,45 @@ const updateMonthlyBudget = async (req, res) => {
     const { openingBalance } = req.body;
     const userId = req.user.userId;
 
-    if (!openingBalance || openingBalance <= 0) {
+    // 🔒 Ensure openingBalance is a valid positive number
+    if (!openingBalance || Number(openingBalance) <= 0) {
       return res.status(400).json({ message: "Opening balance must be greater than zero." });
     }
 
+    // 🗓 Get current month key
     const now = new Date();
     const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 
-    const updated = await MonthlyBudget.findOneAndUpdate(
+    // 🔄 Attempt update
+    const updatedBudget = await MonthlyBudget.findOneAndUpdate(
       { userId, month },
       {
-        openingBalance,
-        currentBalance: openingBalance // Reset currentBalance if you're allowing this
+        openingBalance: Number(openingBalance),
+        currentBalance: Number(openingBalance)
       },
-      { new: true }
+      {
+        new: true // return updated document
+        // Optional: add upsert: true if you want to create if not exists
+      }
     );
 
-    if (!updated) {
+    // ❌ If no budget found
+    if (!updatedBudget) {
       return res.status(404).json({ message: "No budget found to update for this month." });
     }
 
-    res.status(200).json(updated);
+    return res.status(200).json(updatedBudget);
   } catch (err) {
-    res.status(500).json({ message: "Failed to update budget", error: err.message });
+    console.error("Error updating budget:", err.message);
+    return res.status(500).json({
+      message: "Failed to update budget",
+      error: err.message
+    });
   }
 };
+
+// module.exports = updateMonthlyBudget;
+
 
 module.exports = {
   createMonthlyBudget,

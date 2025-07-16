@@ -10,6 +10,6 @@ const router = express.Router();
 
 router.post("/", auth, createMonthlyBudget);
 router.get("/", auth, getMonthlyBudget);
-router.put("/", auth, updateMonthlyBudget); // 🆕 Update openingBalance
+router.put("/:id", auth, updateMonthlyBudget); // 🆕 Update openingBalance
 
 module.exports = router;
