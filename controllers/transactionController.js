@@ -6,42 +6,42 @@ const mongoose = require("mongoose");
 // ➕ Add Transaction with Budget Enforcement
 const addTransaction = async (req, res) => {
   try {
-    const { type, amount, description } = req.body;
+    const { type, amount, description, date } = req.body;
     const userId = req.user.userId;
 
     if (!["credit", "debit"].includes(type)) {
       return res.status(400).json({ message: "Type must be credit or debit." });
     }
 
-    if (!amount || amount <= 0) {
+    if (!amount || Number(amount) <= 0) {
       return res.status(400).json({ message: "Amount must be a positive number." });
     }
 
-    const now = new Date();
-    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const txnDate = date ? new Date(date) : new Date();
+    const monthKey = txnDate.toISOString().slice(0, 7); // e.g. "2024-07"
 
     const budget = await Budget.findOne({ userId, month: monthKey });
     if (!budget) {
       return res.status(403).json({ message: "Monthly budget not set." });
     }
 
-    if (type === "debit" && amount > budget.currentBalance) {
+    if (type === "debit" && Number(amount) > budget.currentBalance) {
       return res.status(400).json({ message: "Insufficient balance." });
     }
 
     const transaction = await Transaction.create({
       userId,
       type,
-      amount,
+      amount: Number(amount),
       description,
-      date: now,
+      date: txnDate,
       month: monthKey
     });
 
     const newBalance =
       type === "debit"
-        ? budget.currentBalance - amount
-        : budget.currentBalance + amount;
+        ? budget.currentBalance - Number(amount)
+        : budget.currentBalance + Number(amount);
 
     await Budget.updateOne(
       { userId, month: monthKey },
@@ -54,6 +54,7 @@ const addTransaction = async (req, res) => {
   }
 };
 
+
 // 📤 Get Monthly Transactions + Summary
 const getTransactions = async (req, res) => {
   try {
@@ -65,7 +66,7 @@ const getTransactions = async (req, res) => {
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
     const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
 
-    // Fetch data
+    // Fetch all needed data concurrently
     const [transactions, budget, recurringRules] = await Promise.all([
       Transaction.find({ userId, date: { $gte: startOfMonth, $lte: endOfMonth } }),
       Budget.findOne({ userId, month: monthKey }),
@@ -74,40 +75,58 @@ const getTransactions = async (req, res) => {
 
     const openingBalance = budget?.openingBalance || 0;
 
-    // Basic transaction totals
-    const totalCredit = transactions.filter(txn => txn.type === "credit").reduce((sum, txn) => sum + txn.amount, 0);
-    const totalDebit = transactions.filter(txn => txn.type === "debit").reduce((sum, txn) => sum + txn.amount, 0);
+    const totalCredit = transactions
+      .filter(tx => tx.type === "credit")
+      .reduce((sum, tx) => sum + tx.amount, 0);
+
+    const totalDebit = transactions
+      .filter(tx => tx.type === "debit")
+      .reduce((sum, tx) => sum + tx.amount, 0);
 
     let totalRecurringCredit = 0;
     let totalRecurringDebit = 0;
 
-    // Virtual transactions from recurring rules
-    const virtualTransactions = recurringRules
-      .filter(rule => {
-        if (rule.frequency === "monthly" && rule.startsOn instanceof Date) {
-          return rule.startsOn.getDate() <= dayOfMonth;
-        }
-        if (rule.frequency === "weekly" && rule.weeklyDay === dayOfWeek) {
-          return true;
-        }
-        return false;
-      })
-      .map(rule => {
-        if (rule.type === "debit") totalRecurringDebit += rule.amount;
-        else totalRecurringCredit += rule.amount;
+    const virtualTransactions = [];
 
-        return {
+    // Generate virtual recurring transactions
+    for (const rule of recurringRules) {
+      const isDue =
+        (rule.frequency === "monthly" && rule.startsOn.getDate() <= dayOfMonth) ||
+        (rule.frequency === "weekly" && rule.weeklyDay === dayOfWeek);
+
+      if (!isDue) continue;
+
+      const virtualDesc = `Recurring: ${rule.title}`.trim();
+      const virtualType = (rule.type || "").trim().toLowerCase();
+      const virtualAmount = rule.amount;
+
+      const alreadyExists = transactions.some(tx =>
+        tx.description?.trim() === virtualDesc &&
+        tx.amount === virtualAmount &&
+        (tx.type || "").trim().toLowerCase() === virtualType &&
+        tx.date.getMonth() === today.getMonth() &&
+        tx.date.getFullYear() === today.getFullYear()
+      );
+
+      if (!alreadyExists) {
+        if (virtualType === "debit") totalRecurringDebit += virtualAmount;
+        else totalRecurringCredit += virtualAmount;
+
+        virtualTransactions.push({
           _id: `virtual-${rule._id}`,
           userId,
           type: rule.type,
           amount: rule.amount,
-          description: `Recurring: ${rule.title}`,
+          description: virtualDesc,
           date: today,
           isAutoGenerated: true
-        };
-      });
+        });
+      }
+    }
 
-    const allTransactions = [...transactions, ...virtualTransactions].sort((a, b) => new Date(a.date) - new Date(b.date));
+    const allTransactions = [...transactions, ...virtualTransactions].sort(
+      (a, b) => new Date(a.date) - new Date(b.date)
+    );
 
     const netBalance =
       openingBalance + totalCredit + totalRecurringCredit - totalDebit - totalRecurringDebit;
@@ -126,6 +145,9 @@ const getTransactions = async (req, res) => {
   }
 };
 
+
+
+
 // ✏️ Update Transaction (with balance adjustment)
 const updateTransaction = async (req, res) => {
   try {
@@ -138,41 +160,52 @@ const updateTransaction = async (req, res) => {
       return res.status(404).json({ message: "Transaction not found." });
     }
 
-    const monthKey = original.month;
+    const monthKey = original.month || new Date(original.date).toISOString().slice(0, 7);
     const budget = await Budget.findOne({ userId, month: monthKey });
+
     if (!budget) {
       return res.status(403).json({ message: "Budget not found for this month." });
     }
 
-    // Reverse old transaction
+    // Reverse old transaction effect
     let tempBalance =
       original.type === "debit"
         ? budget.currentBalance + original.amount
         : budget.currentBalance - original.amount;
 
-    // Apply new transaction
-    if (newData.type === "debit" && newData.amount > tempBalance) {
+    // Apply new transaction effect
+    const newAmount = Number(newData.amount);
+    const newType = newData.type;
+
+    if (newType === "debit" && newAmount > tempBalance) {
       return res.status(400).json({ message: "Insufficient balance after update." });
     }
 
     tempBalance =
-      newData.type === "debit"
-        ? tempBalance - newData.amount
-        : tempBalance + newData.amount;
+      newType === "debit"
+        ? tempBalance - newAmount
+        : tempBalance + newAmount;
 
     const updatedTxn = await Transaction.findOneAndUpdate(
       { _id: id, userId },
-      newData,
+      {
+        ...newData,
+        amount: newAmount
+      },
       { new: true }
     );
 
-    await Budget.updateOne({ userId, month: monthKey }, { currentBalance: tempBalance });
+    await Budget.updateOne(
+      { userId, month: monthKey },
+      { currentBalance: tempBalance }
+    );
 
     res.status(200).json(updatedTxn);
   } catch (err) {
     res.status(500).json({ message: "Update failed", error: err.message });
   }
 };
+
 
 // 🗑 Delete Transaction (with budget restore)
 const deleteTransaction = async (req, res) => {
