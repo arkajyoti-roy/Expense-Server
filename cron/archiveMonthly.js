@@ -1,5 +1,5 @@
 const cron = require("node-cron");
-const User = require("../models/User");
+const User = require("../models/user");
 const archiveMonthEndSnapshot = require("../utils/archiveMonthEndSnapshot");
 
 cron.schedule("30 0 1 * *", async () => {
